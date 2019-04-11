@@ -1,0 +1,178 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Resources:
+
+  ReactionTask:
+    Type: Custom::LoadLambda
+    Properties:
+      ContainerDefinitions:
+      - Secrets:
+        - {Name: SOME_ENV_VAR_NAME, ValueFrom: SsmOrSecretsManagerParameterArn}
+        Name: !Ref AWS::StackName
+        Image: repository-url/image:tag
+        Memory: 256
+      ServiceToken: !GetAtt TaskDefinitionExtCustomResource.Arn
+      Family: !Ref AWS::StackName
+      ExecutionRoleArn: !GetAtt TaskRole.Arn
+
+
+  TaskDefinitionExtCustomResource:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs8.10
+      Handler: index.handler
+      Role: !GetAtt TaskDefinitionExtCustomResourceRole.Arn
+      Layers:
+      - !Ref NewerAwsSdkLayer
+      Code:
+        ZipFile: |
+          const https = require('https');
+          const url = require('url');
+          let aws = require('aws-sdk');
+          console.log('Default AWS SDK version:', aws.VERSION);
+          if (aws.VERSION < '2.357.0') {
+            console.log('Using AWS SDK from the layer');
+            aws = require('/opt/node_modules/aws-sdk');
+          }
+          console.log('Effective AWS SDK version:', aws.VERSION);
+          const ecs = new aws.ECS();
+
+          exports.handler = async function(event, context) {
+            console.log('event:', JSON.stringify(event));
+
+            try {
+              let responseData = {};
+              if (event.RequestType === 'Delete') {
+              } else {
+              let {
+                ServiceToken,
+                ...params
+              } = event.ResourceProperties;
+              params = decapitilizePropertyNames(params);
+              console.log('registerTaskDefinition params:', JSON.stringify(params));
+              responseData = await ecs
+                .registerTaskDefinition(params)
+                .promise()
+                .then(result => ({PhysicalResourceId: result.taskDefinition.taskDefinitionArn}));
+              }
+
+              console.log('responseData:', JSON.stringify(responseData));
+              await sendResponse(event, context, 'SUCCESS', responseData);
+            } catch(e) {
+              console.error(e);
+              await sendResponse(event, context, 'FAILED');
+            }
+          };
+
+          function decapitilizePropertyNames(o) {
+            if (o instanceof Array ) {
+              return o.map(item => decapitilizePropertyNames(item));
+            } 
+            if (typeof o !== 'object') {
+              return o;
+            } 
+
+            return Object.keys(o).reduce(
+              (result, key) => {
+                result[key.charAt(0).toLowerCase() + key.slice(1)] = decapitilizePropertyNames(o[key]);
+                return result;
+              },
+              {}
+            );
+          }
+          // Send response to the pre-signed S3 URL
+          function sendResponse (event, context, responseStatus, responseData) {
+            let PhysicalResourceId;
+            if (responseData && responseData.PhysicalResourceId) {
+              PhysicalResourceId = responseData.PhysicalResourceId;
+            } else if (event.PhysicalResourceId) {
+              PhysicalResourceId = event.PhysicalResourceId;
+            }
+            const  responseBody = JSON.stringify({
+              Status: responseStatus,
+              Reason: `See the details in CloudWatch Log Stream ${context.logGroupName}/${context.logStreamName}`,
+              PhysicalResourceId,
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId,
+              Data: responseData
+            });
+
+            const parsedUrl = url.parse(event.ResponseURL);
+            const options = {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.path,
+              method: 'PUT',
+              headers: {
+                'content-type': '',
+                'content-length': responseBody.length
+              }
+            };
+
+            return new Promise((resolve, reject) => {
+              const request = https.request(
+                options,
+                (response) => {
+                  console.log('STATUS:', response.statusCode);
+                  console.log('HEADERS:', response.headers);
+                  resolve();
+                });
+
+              request.on('error', reject);
+
+              request.write(responseBody);
+              request.end();
+            });
+          }
+
+  NewerAwsSdkLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      ContentUri: aws-js-sdk
+      RetentionPolicy: Delete
+
+  TaskDefinitionExtCustomResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+      - PolicyName: ECS
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecs:RegisterTaskDefinition
+            Resource: "*"
+      - PolicyName: IAM
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+            - iam:PassRole
+            Resource: !GetAtt TaskRole.Arn
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: 
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
