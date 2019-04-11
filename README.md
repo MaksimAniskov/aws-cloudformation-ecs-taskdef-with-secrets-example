@@ -15,7 +15,7 @@ Enjoy!
 
 ![A ValueFrom variable in AWS ECS Console](img/1.png)
 
-Hopefully AWS will update CloudFormation to support ValueFrom variables in near future.
+Hopefully AWS will update CloudFormation to support ValueFrom variables in the near future.
 
 # How to deploy the example
 ```
